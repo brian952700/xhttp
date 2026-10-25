@@ -217,6 +217,11 @@ def main():
     check('local HTTP fixture responds directly', direct.stdout == 'xy-ci-ok\n')
     debug_config = content()
     debug_config['log']['loglevel'] = 'info'
+    # Xray 26.10+ blocks private targets for VLESS by default. Allow only
+    # this disposable local fixture, without changing generated production config.
+    debug_config['outbounds'][0]['settings'] = {'finalRules': [
+        {'action': 'allow', 'network': 'tcp', 'ip': ['127.0.0.1/32'], 'port': '19080'}]}
+
     Path('/tmp/debug-server.json').write_text(json.dumps(debug_config))
     manager('lock\napply_config /tmp/debug-server.json')
     proxy_test(admin)
@@ -309,6 +314,13 @@ update_domain_cert"""
     close(child)
     check('same-domain certificate refresh preserves configuration', CONFIG.read_bytes() == baseline[0] and digest(CERT) != current_cert and active())
     proxy_test(admin, 'next.example.test')
+
+
+    # Switching back to an archived domain restores its ACME renewal configuration.
+    result = manager('update_domain_cert', input='ci.example.test\ny\n')
+    check('returning to previous domain restores renewal config', domain_file.read_text().strip() == 'ci.example.test' and
+          (FIXTURE / 'ci.example.test.conf').is_file() and CONFIG.read_bytes() == baseline[0] and active())
+    proxy_test(admin)
 
     # Bootstrap under sudo must still read the menu from /dev/tty.
     run('useradd', '-m', 'ciuser')
