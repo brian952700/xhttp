@@ -118,7 +118,7 @@ atomic_copy() {
 # 调用方持有锁。多文件事务在普通错误、INT/TERM 时恢复；断电/SIGKILL 不在此保证内。
 apply_config() (
     set -e
-    local candidate=$1 with_cert=${2:-no} backup armed=0 was_active=0 failed=0 f
+    local candidate=$1 with_cert=${2:-no} new_domain=${3:-} host_check backup armed=0 was_active=0 failed=0 f
     identity
     backup=$(mktemp -d "$XRAY_DIR/.xy-backup.XXXXXX")
     systemctl is-active --quiet xray && was_active=1
@@ -126,9 +126,9 @@ apply_config() (
         local rc=$?
         trap - EXIT INT TERM
         if (( armed )); then
-            for f in config.json server.crt server.key; do
+            for f in config.json server.crt server.key domain.txt; do
                 local target
-                case $f in config.json) target=$CONFIG;; server.crt) target=$CERT;; server.key) target=$KEY;; esac
+                case $f in config.json) target=$CONFIG;; server.crt) target=$CERT;; server.key) target=$KEY;; domain.txt) target=$DOMAIN_FILE;; esac
                 if [[ -f $backup/$f ]]; then
                     atomic_copy "$backup/$f" "$target" || failed=1
                 elif [[ -f $backup/$f.absent ]]; then
@@ -159,7 +159,9 @@ apply_config() (
         cp "$STAGE/server.crt" "$backup/staged.crt"
         cp "$STAGE/server.key" "$backup/staged.key"
         openssl x509 -in "$backup/staged.crt" -noout -checkend 86400
-        openssl x509 -in "$backup/staged.crt" -noout -checkhost "$(cat "$DOMAIN_FILE")"
+        host_check=$(openssl x509 -in "$backup/staged.crt" -noout -checkhost "${new_domain:-$(cat "$DOMAIN_FILE")}")
+        say "$host_check"
+        [[ $host_check == *" does match certificate" ]] || die '证书与目标域名不匹配。'
         openssl x509 -in "$backup/staged.crt" -pubkey -noout > "$backup/cert.pub"
         openssl pkey -in "$backup/staged.key" -pubout > "$backup/key.pub"
         cmp -s "$backup/cert.pub" "$backup/key.pub" || die '证书和私钥不匹配。'
@@ -172,7 +174,7 @@ apply_config() (
         test_config "$backup/new.json"
     fi
 
-    for f in "$CONFIG" "$CERT" "$KEY"; do
+    for f in "$CONFIG" "$CERT" "$KEY" "$DOMAIN_FILE"; do
         if [[ -e $f ]]; then cp -p -- "$f" "$backup/$(basename "$f")";
         else touch "$backup/$(basename "$f").absent"; fi
     done
@@ -188,6 +190,11 @@ apply_config() (
     atomic_copy "$backup/new.json" "$CONFIG"
     # 以实际服务身份检查文件可读性与配置，避免 root 检查通过而服务打不开私钥。
     runuser -u "$SERVICE_USER" -g "$SERVICE_GROUP" -- "$(command -v xray)" run -test -config "$CONFIG"
+    if [[ -n $new_domain ]]; then
+        printf '%s\n' "$new_domain" > "$backup/new.domain"
+        chmod 0600 "$backup/new.domain"
+        atomic_copy "$backup/new.domain" "$DOMAIN_FILE"
+    fi
     healthy_restart
     armed=0
 )
@@ -206,11 +213,55 @@ select_acme() {
     fi
 }
 
+prepare_certificate() {
+    select_acme
+    local rc acme_cert_dir
+    if [[ ! -f $ACME ]]; then
+        install -d -m 0700 "$ACME_HOME"
+        download https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh "$work/acme.sh"
+        sh -n "$work/acme.sh"
+        cd "$work"
+        sh ./acme.sh --install --home "$ACME_HOME" --no-cron --no-profile --accountemail "admin@$DOMAIN"
+    fi
+    if [[ $ACME_BASE == "$ACME_HOME" ]]; then
+        # 单独的 cron 文件，避免 acme.sh 管理 root crontab 时影响其他安装。
+        printf '%s\n' 'SHELL=/bin/sh' 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+            '17 3 * * * root /etc/xray-cert/acme/acme.sh --cron --home /etc/xray-cert/acme >>/var/log/xy-acme.log 2>&1' > "$work/xy-acme"
+        install -o root -g root -m 0644 "$work/xy-acme" /etc/cron.d/xy-acme
+    fi
+    "$ACME" --home "$ACME_BASE" --upgrade --auto-upgrade
+    # 不强制刷新未到期证书，避免重复运行触发 CA 限额。
+    acme_cert_dir=$ACME_BASE/$DOMAIN
+    [[ ${#ECC[@]} -eq 0 ]] || acme_cert_dir=${acme_cert_dir}_ecc
+    if [[ ! -s $acme_cert_dir/fullchain.cer ]]; then
+        [[ -z $(ss -H -ltn 'sport = :80') ]] || die 'TCP 80 已被占用，无法使用 standalone 验证。'
+        say '申请证书：公网 TCP 80 必须可达；如有 AAAA 记录，IPv6 也须正确。'
+        rc=0
+        "$ACME" --home "$ACME_BASE" --issue --server letsencrypt --standalone --keylength ec-256 -d "$DOMAIN" || rc=$?
+        [[ $rc -eq 0 || $rc -eq 2 ]] || die "证书申请失败（退出码 $rc）。"
+    fi
+    # 每个域名单独暂存；回调检查当前域名，防止旧域名覆盖新证书。
+    STAGE=$CERT_DIR/staging/$DOMAIN
+    install -d -o root -g root -m 0700 "$STAGE"
+    # 永久保存正式回调；仅本次子进程继承跳过标志，由下方事务完成部署。
+    # 标志不会写入 acme 配置/cron，即使本次部署失败，后续回调仍然有效。
+    XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --install-cert -d "$DOMAIN" "${ECC[@]}" \
+        --key-file "$STAGE/server.key" --fullchain-file "$STAGE/server.crt" --reloadcmd "$SCRIPT --renew-reload $DOMAIN"
+    if [[ ${FORCE_RENEW:-no} == yes ]] || ! openssl x509 -in "$STAGE/server.crt" -noout -checkend 86400 >/dev/null; then
+        [[ -z $(ss -H -ltn 'sport = :80') ]] || die 'TCP 80 已被占用，证书无法续期。'
+        local -a force_args=()
+        [[ ${FORCE_RENEW:-no} != yes ]] || force_args=(--force)
+        rc=0
+        XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}" "${force_args[@]}" || rc=$?
+        [[ $rc -eq 0 || $rc -eq 2 ]] || die "证书续期失败（退出码 $rc）。"
+    fi
+}
+
 install_xray() (
     set -e
     dependencies
     lock
-    local work existing=0 PORT XPATH UUID rc
+    local work existing=0 PORT XPATH UUID
     work=$(mktemp -d)
     trap 'rm -rf -- "$work"' EXIT
     [[ -f $CONFIG ]] && existing=1
@@ -252,39 +303,7 @@ install_xray() (
         ' > "$work/candidate.json"
         printf '%s\n' "$DOMAIN" > "$DOMAIN_FILE"
     fi
-    select_acme
-    if [[ ! -f $ACME ]]; then
-        install -d -m 0700 "$ACME_HOME"
-        download https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh "$work/acme.sh"
-        sh -n "$work/acme.sh"
-        cd "$work"
-        sh ./acme.sh --install --home "$ACME_HOME" --no-cron --no-profile --accountemail "admin@$DOMAIN"
-    fi
-    if [[ $ACME_BASE == "$ACME_HOME" ]]; then
-        # 单独的 cron 文件，避免 acme.sh 管理 root crontab 时影响其他安装。
-        printf '%s\n' 'SHELL=/bin/sh' 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
-            '17 3 * * * root /etc/xray-cert/acme/acme.sh --cron --home /etc/xray-cert/acme >>/var/log/xy-acme.log 2>&1' > "$work/xy-acme"
-        install -o root -g root -m 0644 "$work/xy-acme" /etc/cron.d/xy-acme
-    fi
-    "$ACME" --home "$ACME_BASE" --upgrade --auto-upgrade
-    # 不强制刷新未到期证书，避免重复运行触发 CA 限额。
-    local acme_cert_dir=$ACME_BASE/$DOMAIN
-    [[ ${#ECC[@]} -eq 0 ]] || acme_cert_dir=${acme_cert_dir}_ecc
-    if [[ ! -s $acme_cert_dir/fullchain.cer ]]; then
-        [[ -z $(ss -H -ltn 'sport = :80') ]] || die 'TCP 80 已被占用，无法使用 standalone 验证。'
-        say '申请证书：公网 TCP 80 必须可达；如有 AAAA 记录，IPv6 也须正确。'
-        rc=0
-        "$ACME" --home "$ACME_BASE" --issue --server letsencrypt --standalone --keylength ec-256 -d "$DOMAIN" || rc=$?
-        [[ $rc -eq 0 || $rc -eq 2 ]] || die "证书申请失败（退出码 $rc）。"
-    fi
-    # 永久保存正式回调；仅本次子进程继承跳过标志，由下方事务完成部署。
-    # 标志不会写入 acme 配置/cron，即使本次部署失败，后续回调仍然有效。
-    XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --install-cert -d "$DOMAIN" "${ECC[@]}" \
-        --key-file "$STAGE/server.key" --fullchain-file "$STAGE/server.crt" --reloadcmd "$SCRIPT --renew-reload"
-    if ! openssl x509 -in "$STAGE/server.crt" -noout -checkend 86400 >/dev/null; then
-        [[ -z $(ss -H -ltn 'sport = :80') ]] || die 'TCP 80 已被占用，证书无法续期。'
-        XY_STAGE_ONLY=1 "$ACME" --home "$ACME_BASE" --renew -d "$DOMAIN" "${ECC[@]}"
-    fi
+    prepare_certificate
     apply_config "$work/candidate.json" yes
     systemctl enable xray
     say '安装/更新完成；证书续期回调已注册。'
@@ -297,8 +316,82 @@ renew_reload() (
     lock
     require_tools
     managed_config
+    if [[ -n ${1:-} ]]; then
+        domain_valid "$1" || die '续期回调域名无效。'
+        [[ $1 == "$(cat "$DOMAIN_FILE")" ]] || { say '忽略旧域名的续期回调。'; exit 0; }
+        STAGE=$CERT_DIR/staging/$1
+    fi
     directories
     apply_config "$CONFIG" yes
+)
+
+restart_xray() (
+    set -e
+    require_tools
+    lock
+    managed_config
+    identity
+    runuser -u "$SERVICE_USER" -g "$SERVICE_GROUP" -- "$(command -v xray)" run -test -config "$CONFIG"
+    say '正在重启 Xray，连接会短暂中断…'
+    if healthy_restart; then
+        say 'Xray 服务已重启并正常运行。'
+    else
+        say 'Xray 重启失败，请查看 journalctl -u xray -n 50 --no-pager。' >&2
+        exit 1
+    fi
+)
+
+update_domain_cert() (
+    set -e
+    require_tools
+    local OLD_DOMAIN DOMAIN CONFIRM FORCE_RENEW=no work old_acme old_base
+    local -a old_ecc
+    managed_config
+    OLD_DOMAIN=$(cat "$DOMAIN_FILE")
+    domain_valid "$OLD_DOMAIN" || die '保存的域名格式无效。'
+    say "当前域名：$OLD_DOMAIN"
+    ask DOMAIN '请输入新域名（留空保留当前域名，仅更新证书）：'
+    DOMAIN=${DOMAIN:-$OLD_DOMAIN}
+    DOMAIN=${DOMAIN,,}
+    domain_valid "$DOMAIN" || die '域名格式错误，请使用普通域名或 Punycode，不含协议/端口/路径。'
+    if [[ $DOMAIN == "$OLD_DOMAIN" ]]; then
+        ask CONFIRM '强制重新签发证书？重复操作可能触发 CA 限额 [y/N]：'
+        [[ ! $CONFIRM =~ ^[Yy]$ ]] || FORCE_RENEW=yes
+    fi
+    say '请确认域名已解析到本服务器，公网 TCP 80 可达；部署时连接会短暂中断。'
+    ask CONFIRM '确定更新域名及证书？[y/N]：'
+    [[ $CONFIRM =~ ^[Yy]$ ]] || exit 0
+    lock
+    managed_config
+    [[ $(cat "$DOMAIN_FILE") == "$OLD_DOMAIN" ]] || die '域名已被其他操作修改，请重新打开此功能。'
+    directories
+    work=$(mktemp -d)
+    trap 'rm -rf -- "$work"' EXIT
+    cp "$CONFIG" "$work/candidate.json"
+
+    # 先迁移旧域名的回调；后续申请/部署失败时旧域名仍可续期。
+    local target_domain=$DOMAIN
+    DOMAIN=$OLD_DOMAIN
+    select_acme
+    old_acme=$ACME; old_base=$ACME_BASE; old_ecc=("${ECC[@]}")
+    [[ -f $old_acme ]] || die '找不到原 ACME 环境，请先选择菜单 1 安装/更新。'
+    install -d -o root -g root -m 0700 "$CERT_DIR/staging/$OLD_DOMAIN"
+    XY_STAGE_ONLY=1 "$old_acme" --home "$old_base" --install-cert -d "$OLD_DOMAIN" "${old_ecc[@]}" \
+        --key-file "$CERT_DIR/staging/$OLD_DOMAIN/server.key" \
+        --fullchain-file "$CERT_DIR/staging/$OLD_DOMAIN/server.crt" \
+        --reloadcmd "$SCRIPT --renew-reload $OLD_DOMAIN"
+    DOMAIN=$target_domain
+    prepare_certificate
+    apply_config "$work/candidate.json" yes "$DOMAIN"
+    if [[ $DOMAIN != "$OLD_DOMAIN" ]]; then
+        # 成功切换后才停止旧域名续期，旧证书存档保留。
+        if ! "$old_acme" --home "$old_base" --remove -d "$OLD_DOMAIN" "${old_ecc[@]}"; then
+            say '提示：旧域名续期未能停止，其回调会被忽略；请检查 ACME 日志。' >&2
+        fi
+    fi
+    say '域名及证书更新完成。用户、UUID、端口和路径已保留。'
+    say '如更换了域名，请使用下方新链接更新客户端：'
+    list_users
 )
 
 add_user() (
@@ -393,7 +486,8 @@ uninstall_all() (
 main() {
     platform
     if [[ ${1:-} == --renew-reload ]]; then
-        renew_reload >>/var/log/xray_cron_error.log 2>&1
+        [[ $# -le 2 ]] || die '续期回调参数过多。'
+        renew_reload "${2:-}" >>/var/log/xray_cron_error.log 2>&1
         return $?
     fi
     [[ $# -eq 0 ]] || die '未知参数。'
@@ -406,8 +500,8 @@ main() {
     fi
     local CHOICE rc
     while true; do
-        printf '\nVLESS + xHTTP + TLS 多用户管理\n1. 安装/更新环境（保留现有配置）\n2. 添加用户\n3. 删除用户\n4. 查看所有用户及链接\n5. 彻底卸载\n6. 退出\n'
-        ask CHOICE '请选择 [1-6]：'
+        printf '\nVLESS + xHTTP + TLS 多用户管理\n1. 安装/更新环境（保留现有配置）\n2. 添加用户\n3. 删除用户\n4. 查看所有用户及链接\n5. 彻底卸载\n6. 退出\n7. 重启 Xray 服务\n8. 更新域名及证书\n'
+        ask CHOICE '请选择 [1-8]：'
         case $CHOICE in
             1) install_xray;;
             2) add_user;;
@@ -415,6 +509,8 @@ main() {
             4) list_users;;
             5) uninstall_all; rc=$?; [[ -f $SCRIPT ]] || return "$rc"; (exit "$rc");;
             6) return 0;;
+            7) restart_xray;;
+            8) update_domain_cert;;
             *) say '无效选项。'; continue;;
         esac
         rc=$?
