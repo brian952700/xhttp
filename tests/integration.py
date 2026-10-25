@@ -101,8 +101,8 @@ def proxy_test(uuid, domain='ci.example.test'):
     with open('/tmp/ci-client.log', 'w') as log:
         client = subprocess.Popen(['xray', 'run', '-config', str(client_file)], stdout=log, stderr=log)
         try:
-            for _ in range(5):
-                response = run('curl', '-fsS', '--max-time', '15', '--noproxy', '',
+            for _ in range(3):
+                response = run('curl', '-fsS', '--max-time', '5', '--noproxy', '',
                     '--socks5-hostname', '127.0.0.1:10808', 'http://127.0.0.1:19080/',
                     check=False, capture_output=True)
                 if response.returncode == 0:
@@ -213,6 +213,12 @@ def main():
             pass
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 19080), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    direct = run('curl', '-fsS', '--max-time', '5', '--noproxy', '*', 'http://127.0.0.1:19080/', capture_output=True)
+    check('local HTTP fixture responds directly', direct.stdout == 'xy-ci-ok\n')
+    debug_config = content()
+    debug_config['log']['loglevel'] = 'info'
+    Path('/tmp/debug-server.json').write_text(json.dumps(debug_config))
+    manager('lock\napply_config /tmp/debug-server.json')
     proxy_test(admin)
 
     before = CONFIG.read_bytes()

@@ -16,7 +16,8 @@ while (($#)); do
     esac
 done
 case $mode in
-    --upgrade|--remove) exit 0;;
+    --upgrade) exit 0;;
+    --remove) mv -- "$home/${domain}_ecc/$domain.conf" "$home/${domain}_ecc/$domain.conf.removed";;
     --issue) printf 'CI: public issuance intentionally unavailable\n' >&2; exit 1;;
     --renew)
         [[ -s "$home/${domain}_ecc/fullchain.cer" ]]

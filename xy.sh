@@ -233,6 +233,10 @@ prepare_certificate() {
     # 不强制刷新未到期证书，避免重复运行触发 CA 限额。
     acme_cert_dir=$ACME_BASE/$DOMAIN
     [[ ${#ECC[@]} -eq 0 ]] || acme_cert_dir=${acme_cert_dir}_ecc
+    # acme.sh --remove 将续期配置改名；切回曾使用的域名时恢复完整配置。
+    if [[ ! -f $acme_cert_dir/$DOMAIN.conf && -f $acme_cert_dir/$DOMAIN.conf.removed ]]; then
+        cp -p -- "$acme_cert_dir/$DOMAIN.conf.removed" "$acme_cert_dir/$DOMAIN.conf"
+    fi
     if [[ ! -s $acme_cert_dir/fullchain.cer ]]; then
         [[ -z $(ss -H -ltn 'sport = :80') ]] || die 'TCP 80 已被占用，无法使用 standalone 验证。'
         say '申请证书：公网 TCP 80 必须可达；如有 AAAA 记录，IPv6 也须正确。'
