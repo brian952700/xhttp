@@ -9,7 +9,7 @@
 在 Debian 13 的 SSH 终端中复制执行：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/brian952700/xray-xhttp-manager/main/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/brian952700/xhttp/main/install.sh | bash'
 ```
 
 支持 root 用户直接运行；普通用户需要 sudo 权限，安装时会提示输入密码。安装入口会下载并检查 `xy.sh`，安装到 `/usr/local/bin/xy`，然后自动打开交互菜单。
@@ -24,7 +24,7 @@ sudo xy
 
 root 用户直接输入 `xy` 即可。再次执行一键安装命令会更新管理脚本并打开菜单，不会清空用户；如需安装/更新 Xray 环境，在菜单选择 1。
 
-[查看安装入口 install.sh](https://github.com/brian952700/xray-xhttp-manager/blob/main/install.sh) · [查看主脚本 xy.sh](https://github.com/brian952700/xray-xhttp-manager/blob/main/xy.sh)
+[查看安装入口 install.sh](https://github.com/brian952700/xhttp/blob/main/install.sh) · [查看主脚本 xy.sh](https://github.com/brian952700/xhttp/blob/main/xy.sh)
 
 ### 手动安装（可选）
 
@@ -74,7 +74,7 @@ sudo journalctl -u xray -n 50 --no-pager
 
 续期回调日志在 `/var/log/xray_cron_error.log`；专用 ACME 任务日志在 `/var/log/xy-acme.log`。首次安装或升级选择 1 后，可添加一个临时用户，用客户端验证实际连接，再删除该用户验证管理流程。
 
-2026-09-13 已通过 [GitHub Actions 安装与集成验证（第 2 次尝试）](https://github.com/brian952700/xray-xhttp-manager/actions/runs/34740990458/attempts/2)。测试版本为 `6fda876`，环境为 Debian 13 amd64 容器、真实 systemd PID 1，实际下载并运行 Xray 26.3.27。
+历史验证记录：2026-09-13 已通过 GitHub Actions 安装与集成验证（第 2 次尝试）。该记录来自迁移前的仓库，不代表本仓库当前版本的验证结果。测试版本为 `6fda876`，环境为 Debian 13 amd64 容器、真实 systemd PID 1，实际下载并运行 Xray 26.3.27。
 
 验证覆盖：
 
@@ -89,7 +89,7 @@ sudo journalctl -u xray -n 50 --no-pager
 
 证书测试使用自签名证书和 ACME 测试替身，**未验证公网 ACME 签发、真实定时续期、域名解析或 VPS 防火墙**。首次正式部署仍需使用自己的域名完成证书申请和外部客户端连接验证。CI 中普通用户使用免密 sudo；未覆盖交互输入 sudo 密码。
 
-后续修改脚本或测试文件会自动触发验证，也可在 [Actions 页面](https://github.com/brian952700/xray-xhttp-manager/actions/workflows/debian13.yml) 手动运行。刚推送后 GitHub Raw 缓存可能短暂返回旧脚本，此时版本一致性检查会失败；待缓存更新后重新运行，检查仍会严格核对下载内容。
+后续修改脚本或测试文件会自动触发验证，也可在 [Actions 页面](https://github.com/brian952700/xhttp/actions/workflows/debian13.yml) 手动运行。刚推送后 GitHub Raw 缓存可能短暂返回旧脚本，此时版本一致性检查会失败；待缓存更新后重新运行，检查仍会严格核对下载内容。
 
 回滚范围是本脚本部署的配置和证书，不包括 apt/dnf 软件包、Xray 核心二进制或 acme.sh 升级。服务重启会短暂中断连接；检查通过不等于零中断。多文件替换无法保证突然断电或 SIGKILL 时完整回滚；若自动恢复失败，脚本会显示并保留备份目录。健康检查验证启动后服务仍在运行，不替代客户端端到端验证。
 

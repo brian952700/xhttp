@@ -6,7 +6,7 @@ main() (
     set -euo pipefail
     umask 077
     export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-    local url='https://raw.githubusercontent.com/brian952700/xray-xhttp-manager/main/xy.sh'
+    local url='https://raw.githubusercontent.com/brian952700/xhttp/main/xy.sh'
     local target=/usr/local/bin/xy temp
     local -a elevate=()
 

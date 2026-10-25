@@ -21,7 +21,7 @@ CONFIG = Path('/usr/local/etc/xray/config.json')
 CERT = Path('/etc/xray-cert/server.crt')
 KEY = Path('/etc/xray-cert/server.key')
 FIXTURE = Path('/etc/xray-cert/acme/ci.example.test_ecc')
-RAW = 'https://raw.githubusercontent.com/brian952700/xray-xhttp-manager/main/'
+RAW = 'https://raw.githubusercontent.com/brian952700/xhttp/main/'
 MENU = '请选择 [1-6]：'
 PAUSE = '按 Enter 返回菜单…'
 
