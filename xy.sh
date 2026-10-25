@@ -347,7 +347,7 @@ restart_xray() (
 
 # 调用方持有管理锁；只清理已停止续期的旧域名单个证书目录。
 cleanup_old_domain_cert() {
-    local old_domain=$1 old_base=$2 suffix=$3 archive staging target
+    local old_domain=$1 old_base=$2 suffix=$3 archive staging target legacy=no
     domain_valid "$old_domain" || return 1
     [[ $old_domain != "$(cat "$DOMAIN_FILE")" ]] || return 1
     systemctl is-active --quiet xray || return 1
@@ -364,7 +364,20 @@ cleanup_old_domain_cert() {
             [[ $(readlink -f -- "$target") == "$target" ]] || return 1
         fi
     done
+    # 兼容早期版本的公共暂存文件：仅在证书与旧存档完全相同时清理。
+    if cmp -s "$archive/fullchain.cer" "$CERT_DIR/staging/server.crt"; then
+        for target in "$CERT_DIR/staging/server.crt" "$CERT_DIR/staging/server.key"; do
+            [[ ! -L $target ]] || return 1
+            if [[ -e $target ]]; then
+                [[ $(readlink -f -- "$target") == "$target" ]] || return 1
+            fi
+        done
+        legacy=yes
+    fi
     rm -rf -- "$archive" "$staging" || return 1
+    if [[ $legacy == yes ]]; then
+        rm -f -- "$CERT_DIR/staging/server.crt" "$CERT_DIR/staging/server.key" || return 1
+    fi
     say "已清理旧域名 $old_domain 的证书存档和暂存文件。"
 }
 

@@ -347,6 +347,10 @@ update_domain_cert"""
           (protected / 'keep').is_file() and (FIXTURE.parent / 'next.example.test_ecc/key.pem').is_file())
     old_stage.unlink()
 
+    # Simulate legacy staging left behind by versions predating per-domain paths.
+    shutil.copy(CERT, '/etc/xray-cert/staging/server.crt')
+    shutil.copy(KEY, '/etc/xray-cert/staging/server.key')
+
     # Opt-in cleanup is offered after success and after the new client link.
     child = spawn('/usr/local/bin/xy')
     child.expect_exact(MENU)
@@ -366,6 +370,7 @@ update_domain_cert"""
     close(child)
     check('opt-in cleanup removes only old domain files',
           not FIXTURE.exists() and not Path('/etc/xray-cert/staging/ci.example.test').exists() and
+          not Path('/etc/xray-cert/staging/server.crt').exists() and not Path('/etc/xray-cert/staging/server.key').exists() and
           (unrelated / 'keep').read_text() == 'must survive' and
           (FIXTURE.parent / 'acme.sh').is_file() and Path('/etc/cron.d/xy-acme').is_file() and
           (FIXTURE.parent / 'next.example.test_ecc/key.pem').is_file() and
