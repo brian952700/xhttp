@@ -345,6 +345,29 @@ restart_xray() (
     fi
 )
 
+# 调用方持有管理锁；只清理已停止续期的旧域名单个证书目录。
+cleanup_old_domain_cert() {
+    local old_domain=$1 old_base=$2 suffix=$3 archive staging target
+    domain_valid "$old_domain" || return 1
+    [[ $old_domain != "$(cat "$DOMAIN_FILE")" ]] || return 1
+    systemctl is-active --quiet xray || return 1
+    [[ $old_base == "$ACME_HOME" || $old_base == /root/.acme.sh ]] || return 1
+    [[ $suffix == "" || $suffix == _ecc ]] || return 1
+    archive=$old_base/$old_domain$suffix
+    staging=$CERT_DIR/staging/$old_domain
+    # 保留仍在续期或归属不明的存档，不能因清理绕过停止续期失败。
+    [[ ! -e $archive/$old_domain.conf && -f $archive/$old_domain.conf.removed ]] || return 1
+    # 拒绝符号链接及目录重定向，删除目标必须精确位于预期路径。
+    for target in "$archive" "$staging"; do
+        [[ ! -L $target ]] || return 1
+        if [[ -e $target ]]; then
+            [[ $(readlink -f -- "$target") == "$target" ]] || return 1
+        fi
+    done
+    rm -rf -- "$archive" "$staging" || return 1
+    say "已清理旧域名 $old_domain 的证书存档和暂存文件。"
+}
+
 update_domain_cert() (
     set -e
     require_tools
@@ -396,6 +419,21 @@ update_domain_cert() (
     say '域名及证书更新完成。用户、UUID、端口和路径已保留。'
     say '如更换了域名，请使用下方新链接更新客户端：'
     list_users
+    if [[ $DOMAIN != "$OLD_DOMAIN" ]]; then
+        say '请先使用新链接确认客户端可以连接；清理后切回旧域名需要重新申请证书。'
+        CONFIRM=
+        if ! read -r -p '是否清理旧域名证书？[y/N]：' CONFIRM; then
+            say '未确认清理，已保留旧域名证书。'
+        elif [[ $CONFIRM =~ ^[Yy]$ ]]; then
+            local old_suffix=
+            [[ ${#old_ecc[@]} -eq 0 ]] || old_suffix=_ecc
+            if ! cleanup_old_domain_cert "$OLD_DOMAIN" "$old_base" "$old_suffix"; then
+                say '旧证书未能安全清理，已保留未删除的文件；新域名更新已完成。' >&2
+            fi
+        else
+            say '已保留旧域名证书。'
+        fi
+    fi
 )
 
 add_user() (

@@ -287,7 +287,11 @@ update_domain_cert"""
     child.sendline('y')
     child.expect_exact('域名及证书更新完成。')
     child.expect_exact('@next.example.test:8443')
+    child.expect_exact('是否清理旧域名证书？[y/N]：')
+    child.sendline('')
     resume(child)
+    check('cleanup defaults to preserving old archive and staging',
+          (FIXTURE / 'ci.example.test.conf.removed').is_file() and Path('/etc/xray-cert/staging/ci.example.test/server.key').is_file())
     check('domain change preserves full Xray config', CONFIG.read_bytes() == baseline[0])
     check('domain change deploys matching certificate and domain', domain_file.read_text().strip() == 'next.example.test' and active())
     child.sendline('6')
@@ -317,10 +321,57 @@ update_domain_cert"""
 
 
     # Switching back to an archived domain restores its ACME renewal configuration.
-    result = manager('update_domain_cert', input='ci.example.test\ny\n')
+    result = manager('update_domain_cert', input='ci.example.test\ny\nn\n')
     check('returning to previous domain restores renewal config', domain_file.read_text().strip() == 'ci.example.test' and
           (FIXTURE / 'ci.example.test.conf').is_file() and CONFIG.read_bytes() == baseline[0] and active())
     proxy_test(admin)
+
+
+    # Refuse deleting the current certificate or a path outside the managed homes.
+    result = manager('lock\ncleanup_old_domain_cert ci.example.test "$ACME_HOME" _ecc', check_result=False)
+    check('cleanup refuses active domain', result.returncode != 0 and (FIXTURE / 'key.pem').is_file() and active())
+    result = manager('lock\ncleanup_old_domain_cert next.example.test /tmp _ecc', check_result=False)
+    check('cleanup refuses unrecognized ACME home', result.returncode != 0)
+
+    unrelated = FIXTURE.parent / 'unrelated.example.test_ecc'
+    unrelated.mkdir()
+    (unrelated / 'keep').write_text('must survive')
+    protected = Path('/tmp/xy-protected-cert')
+    protected.mkdir()
+    (protected / 'keep').write_text('must survive')
+    old_stage = Path('/etc/xray-cert/staging/next.example.test')
+    shutil.rmtree(old_stage)
+    old_stage.symlink_to(protected, target_is_directory=True)
+    result = manager('lock\ncleanup_old_domain_cert next.example.test "$ACME_HOME" _ecc', check_result=False)
+    check('cleanup refuses symlink without deleting either target', result.returncode != 0 and
+          (protected / 'keep').is_file() and (FIXTURE.parent / 'next.example.test_ecc/key.pem').is_file())
+    old_stage.unlink()
+
+    # Opt-in cleanup is offered after success and after the new client link.
+    child = spawn('/usr/local/bin/xy')
+    child.expect_exact(MENU)
+    child.sendline('8')
+    child.expect_exact('请输入新域名（留空保留当前域名，仅更新证书）：')
+    child.sendline('next.example.test')
+    child.expect_exact('确定更新域名及证书？[y/N]：')
+    child.sendline('y')
+    child.expect_exact('域名及证书更新完成。')
+    child.expect_exact('@next.example.test:8443')
+    child.expect_exact('是否清理旧域名证书？[y/N]：')
+    proxy_test(admin, 'next.example.test')
+    child.sendline('y')
+    child.expect_exact('已清理旧域名 ci.example.test 的证书存档和暂存文件。')
+    resume(child)
+    child.sendline('6')
+    close(child)
+    check('opt-in cleanup removes only old domain files',
+          not FIXTURE.exists() and not Path('/etc/xray-cert/staging/ci.example.test').exists() and
+          (unrelated / 'keep').read_text() == 'must survive' and
+          (FIXTURE.parent / 'acme.sh').is_file() and Path('/etc/cron.d/xy-acme').is_file() and
+          (FIXTURE.parent / 'next.example.test_ecc/key.pem').is_file() and
+          domain_file.read_text().strip() == 'next.example.test' and CONFIG.read_bytes() == baseline[0] and active())
+    run('/usr/local/bin/xy', '--renew-reload', 'next.example.test')
+    proxy_test(admin, 'next.example.test')
 
     # Bootstrap under sudo must still read the menu from /dev/tty.
     run('useradd', '-m', 'ciuser')
