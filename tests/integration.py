@@ -1,4 +1,4 @@
-"""Debian 13/systemd integration. Only public CA operations are replaced.
+"""Debian 12/13 systemd integration. Only public CA operations are replaced.
 
 Runs only in the disposable CI container. Downloads/installs the real Xray core;
 the local TLS certificate is self-signed and NEVER claims ACME validation.
@@ -116,7 +116,9 @@ def proxy_test(uuid, domain='ci.example.test'):
 
 
 def main():
-    check('Debian 13', 'VERSION_ID="13"' in Path('/etc/os-release').read_text())
+    expected = os.environ['EXPECTED_DEBIAN_VERSION']
+    release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+    check('Debian ' + expected, release.get('VERSION_ID', '').strip('"') == expected)
     check('real systemd PID 1', Path('/proc/1/comm').read_text().strip() == 'systemd')
     for script in ('xy.sh', 'install.sh', 'tests/acme-fixture.sh'):
         run('bash', '-n', str(ROOT / script))
