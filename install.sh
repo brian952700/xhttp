@@ -18,11 +18,25 @@ main() (
         printf '错误：需要交互终端，请在 SSH 终端中运行安装命令。\n' >&2
         exit 1
     fi
-    command -v curl >/dev/null || { printf '错误：请先安装 curl。\n' >&2; exit 1; }
     if (( EUID != 0 )); then
         command -v sudo >/dev/null || { printf '错误：请使用 root 运行，或先安装 sudo。\n' >&2; exit 1; }
         elevate=(sudo)
         sudo -v </dev/tty
+    fi
+
+    # 手动下载入口运行时也补齐下载器和 HTTPS 信任库。
+    if ! command -v curl >/dev/null || [[ ! -s /etc/ssl/certs/ca-certificates.crt && ! -s /etc/pki/tls/certs/ca-bundle.crt ]]; then
+        printf '正在安装下载所需依赖（curl、CA 证书）…\n'
+        if command -v apt-get >/dev/null; then
+            "${elevate[@]}" apt-get update
+            "${elevate[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
+        elif command -v dnf >/dev/null || command -v yum >/dev/null; then
+            local pm
+            pm=$(command -v dnf || command -v yum)
+            "${elevate[@]}" "$pm" install -y curl ca-certificates
+        else
+            printf '错误：无法自动安装依赖，不支持此包管理器。\n' >&2; exit 1
+        fi
     fi
 
     temp=$(mktemp -d)

@@ -9,12 +9,32 @@
 在 Debian 12 或 Debian 13 的 SSH 终端中复制执行：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/brian952700/xhttp/main/install.sh | bash'
+bash -euo pipefail -c '
+if (( EUID == 0 )); then
+    elevate=()
+else
+    command -v sudo >/dev/null || { echo "请使用 root 运行，或先安装 sudo。" >&2; exit 1; }
+    elevate=(sudo)
+    sudo -v
+fi
+if ! command -v curl >/dev/null || [[ ! -s /etc/ssl/certs/ca-certificates.crt && ! -s /etc/pki/tls/certs/ca-bundle.crt ]]; then
+    if command -v apt-get >/dev/null; then
+        "${elevate[@]}" apt-get update
+        "${elevate[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
+    elif command -v dnf >/dev/null || command -v yum >/dev/null; then
+        pm=$(command -v dnf || command -v yum)
+        "${elevate[@]}" "$pm" install -y curl ca-certificates
+    else
+        echo "无法自动安装 curl 和 CA 证书：不支持此包管理器。" >&2; exit 1
+    fi
+fi
+curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 https://raw.githubusercontent.com/brian952700/xhttp/main/install.sh | bash
+'
 ```
 
 支持 root 用户直接运行；普通用户需要 sudo 权限，安装时会提示输入密码。安装入口会下载并检查 `xy.sh`，安装到 `/usr/local/bin/xy`，然后自动打开交互菜单。
 
-若最小化安装的 Debian 尚未安装 curl，请先以 root 执行 `apt-get update && apt-get install -y ca-certificates curl`。
+上面的整段命令可直接粘贴执行：缺少 curl 或系统 CA 信任库时会自动安装；进入首次安装或选择菜单 1 后，自动安装 jq、OpenSSL、socat、cron 等所需依赖。软件源或网络不可用时会显示错误并停止。普通用户仍需已有 sudo 权限；没有 sudo 时请使用 root。
 
 安装后打开管理菜单：
 
@@ -44,10 +64,10 @@ sudo /usr/local/bin/xy
 
 ## 重启服务与更新域名/证书
 
-原有菜单编号 1–6 保持不变：
+菜单顺序为：1 安装/更新、2 添加用户、3 删除用户、4 查看链接、5 卸载、6 重启 Xray、7 更新域名及证书、8 退出。
 
-- **7. 重启 Xray 服务**：先以实际服务身份校验配置，重启后检查运行状态。重启会短暂中断连接。
-- **8. 更新域名及证书**：输入新域名，或留空保留当前域名、仅更新证书。保留域名时可选择强制重新签发，默认不强制，避免触发 CA 限额。
+- **6. 重启 Xray 服务**：先以实际服务身份校验配置，重启后检查运行状态。重启会短暂中断连接。
+- **7. 更新域名及证书**：输入新域名，或留空保留当前域名、仅更新证书。保留域名时可选择强制重新签发，默认不强制，避免触发 CA 限额。
 
 新域名的 A/AAAA 记录须指向本服务器，公网 TCP 80 必须可达且未被其他服务占用。确认后申请或复用证书，校验证书域名、公私钥及配置，再部署并重启；失败时尝试恢复原域名、配置、证书及服务状态。用户、UUID、端口和 xHTTP 路径保留。更换域名成功后，请将输出的新链接重新导入客户端。
 

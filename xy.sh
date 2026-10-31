@@ -555,7 +555,7 @@ main() {
     fi
     local CHOICE rc
     while true; do
-        printf '\nVLESS + xHTTP + TLS 多用户管理\n1. 安装/更新环境（保留现有配置）\n2. 添加用户\n3. 删除用户\n4. 查看所有用户及链接\n5. 彻底卸载\n6. 退出\n7. 重启 Xray 服务\n8. 更新域名及证书\n'
+        printf '\nVLESS + xHTTP + TLS 多用户管理\n1. 安装/更新环境（保留现有配置）\n2. 添加用户\n3. 删除用户\n4. 查看所有用户及链接\n5. 彻底卸载\n6. 重启 Xray 服务\n7. 更新域名及证书\n8. 退出\n'
         ask CHOICE '请选择 [1-8]：'
         case $CHOICE in
             1) install_xray;;
@@ -563,9 +563,9 @@ main() {
             3) del_user;;
             4) list_users;;
             5) uninstall_all; rc=$?; [[ -f $SCRIPT ]] || return "$rc"; (exit "$rc");;
-            6) return 0;;
-            7) restart_xray;;
-            8) update_domain_cert;;
+            6) restart_xray;;
+            7) update_domain_cert;;
+            8) return 0;;
             *) say '无效选项。'; continue;;
         esac
         rc=$?
