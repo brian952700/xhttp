@@ -2,11 +2,11 @@
 
 提供安装/更新、添加用户、删除用户、查看用户及链接、彻底卸载、退出、重启 Xray 服务、更新域名及证书八项菜单。首次运行且不存在配置时自动进入安装流程。
 
-主要适配目标是 Debian 13（trixie）、systemd、普通 Linux VPS。也保留 apt、dnf/yum 分支，但其他发行版未实机验证。不能在 Windows、未运行 systemd 的容器或 OpenWrt 上直接安装。
+适用于 Debian 12（bookworm）和 Debian 13（trixie）、systemd、普通 Linux VPS。两个版本均已通过 amd64 容器中的真实 systemd 集成测试；其他发行版及架构未验证。也保留 apt、dnf/yum 分支。不能在 Windows、未运行 systemd 的容器或 OpenWrt 上直接安装。
 
 ## 一键安装
 
-在 Debian 13 的 SSH 终端中复制执行：
+在 Debian 12 或 Debian 13 的 SSH 终端中复制执行：
 
 ```bash
 bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/brian952700/xhttp/main/install.sh | bash'
@@ -84,6 +84,8 @@ sudo journalctl -u xray -n 50 --no-pager
 ```
 
 续期回调日志在 `/var/log/xray_cron_error.log`；专用 ACME 任务日志在 `/var/log/xy-acme.log`。首次安装或升级选择 1 后，可添加一个临时用户，用客户端验证实际连接，再删除该用户验证管理流程。
+
+当前验证记录：2026-10-31，Debian 12 amd64 已通过完整集成测试，使用真实 systemd PID 1 和 Xray 26.10.29。[查看测试运行](https://github.com/brian952700/xhttp/actions/runs/41163876774)。覆盖一键安装、用户管理、重启、真实 VLESS+xHTTP+TLS 本地代理传输、更新域名及证书、旧证书清理、失败回滚和卸载。自动测试已扩展为 Debian 12/13 矩阵，后续相关代码修改会同时验证两个系统。公网 ACME 签发仍使用测试替身，限制见下文。
 
 历史验证记录：2026-09-13 已通过 GitHub Actions 安装与集成验证（第 2 次尝试）。该记录来自迁移前的仓库，不代表本仓库当前版本的验证结果。测试版本为 `6fda876`，环境为 Debian 13 amd64 容器、真实 systemd PID 1，实际下载并运行 Xray 26.3.27。
 
