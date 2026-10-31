@@ -139,7 +139,7 @@ def main():
 
     # Start without curl/CA trust or manager dependencies, then execute README exactly.
     bootstrap = (ROOT / 'README.md').read_text().split('```bash\n', 1)[1].split('\n```', 1)[0]
-    run('apt-get', 'purge', '-y', 'curl', 'ca-certificates', 'jq', 'socat', 'cron')
+    run('apt-get', 'purge', '-y', 'curl', 'ca-certificates')
     Path('/etc/ssl/certs/ca-certificates.crt').unlink(missing_ok=True)
     check('minimal system has no curl/jq/socat/cron', all(shutil.which(c) is None for c in ('curl', 'jq', 'socat', 'cron')))
     child = spawn('bash', ['-c', bootstrap])
