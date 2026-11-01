@@ -1,0 +1,11 @@
+# Keep text files in Linux LF format, including Windows checkouts.
+* text=auto eol=lf
+
+# Explicitly mark executable scripts and repository configuration as text.
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+.gitattributes text eol=lf
