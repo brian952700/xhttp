@@ -29,7 +29,8 @@ success() { printf '\n  '; paint 32 "✓ $*"; printf '\n\n'; }
 warn() { printf '\n  '; paint 33 "$*"; printf '\n\n'; }
 error() { printf '\n  '; paint 31 "$*"; printf '\n\n'; }
 die() { error "错误：$*" >&2; exit 1; }
-prompt() { printf '\n  '; paint 33 "$1"; }
+prompt() { printf '\n  '; paint 33 "$1"; printf '\n  › '; }
+hint() { printf '\n  '; paint 90 "$*"; printf '\n'; }
 ask() { prompt "$2"; read -r "$1" || die '输入已结束。'; }
 pause() {
     printf '\n  '; paint 90 '按 Enter 返回菜单…'
@@ -40,7 +41,10 @@ section() {
     printf '\n  '; paint 36 "$*"
     printf '\n  '; paint 36 '────────────────────────────────'; printf '\n'
 }
-stage() { printf '\n  '; paint 36 "[$1/$2] $3"; printf '\n\n'; }
+stage() {
+    printf '\n  '; paint 36 '────────────────────────────────'
+    printf '\n  '; paint 36 "[$1/$2] $3"; printf '\n\n'
+}
 field() { printf '  %-12s ' "$1"; paint "$3" "$2"; printf '\n'; }
 
 # 只包装外部命令，避免改变 shell 函数中的失败语义。
@@ -327,22 +331,105 @@ prepare_certificate() {
     fi
 }
 
+# 首次安装先收集并确认参数；输入错误在当前项目重试。
+installation_inputs() {
+    local confirm
+    INSTALL_CONFIRMED=no
+    while true; do
+        section '配置节点'
+        hint '域名需要提前解析到这台服务器，不含协议、端口或路径。'
+        while true; do
+            ask DOMAIN '请输入域名（已解析到本服务器）：'
+            DOMAIN=${DOMAIN,,}
+            if domain_valid "$DOMAIN"; then break; fi
+            warn '域名格式错误，请使用普通域名或 Punycode，不含协议/端口/路径。'
+        done
+        hint '回车使用默认端口 443；80 端口留给证书申请及续期。'
+        while true; do
+            ask PORT '监听端口 [443]：'; PORT=${PORT:-443}
+            if [[ ! $PORT =~ ^[0-9]{1,5}$ ]]; then
+                warn '端口必须是 1–65535 的整数。'; continue
+            fi
+            PORT=$((10#$PORT))
+            if (( PORT < 1 || PORT > 65535 || PORT == 80 )); then
+                warn '端口须为 1–65535，且保留 80 给证书验证。'; continue
+            fi
+            if [[ -n $(ss -H -ltn "sport = :$PORT") ]]; then
+                warn "TCP $PORT 已被占用，请选择其他端口。"; continue
+            fi
+            break
+        done
+        hint '回车使用默认路径 /；客户端需要填写相同路径。'
+        while true; do
+            ask XPATH 'xHTTP 路径 [/]：'; XPATH=${XPATH:-/}
+            if [[ $XPATH == /* && $XPATH != *[[:space:]]* && $XPATH != *\?* && $XPATH != *\#* ]]; then break; fi
+            warn '路径须以 / 开头，且不包含空白、? 或 #。'
+        done
+        section '请确认节点信息'
+        field '服务器地址' "$DOMAIN" 35
+        field '监听端口' "$PORT" 94
+        field 'xHTTP 路径' "$XPATH" 94
+        field 'TLS' '已启用' 32
+        hint '公网 TCP 80 和节点端口须放行。确认后开始安装 Xray 并准备证书。'
+        while true; do
+            ask confirm '确认并继续？[Y/n]（输入 e 重新填写）：'
+            case $confirm in
+                ''|y|Y) INSTALL_CONFIRMED=yes; return 0;;
+                n|N) say '已取消安装，未安装 Xray 或申请证书。'; return 0;;
+                e|E) break;;
+                *) warn '请输入 Y、N 或 E；回车确认。';;
+            esac
+        done
+    done
+}
+
+installation_failure() {
+    local phase=$1 rc=$2
+    error "安装未完成：$phase（退出码 $rc）。"
+    say '具体错误请查看上方输出。'
+    case $phase in
+        '检查系统及依赖') hint '请检查软件源、服务器网络及 apt/dpkg 是否被其他进程占用。';;
+        '配置节点') hint '请输入有效的域名、未被占用的端口和 xHTTP 路径。';;
+        '安装 / 更新 Xray') hint '请检查服务器能否访问 GitHub；可用 XY_VERBOSE=1 xy 查看详细输出。';;
+        '准备域名证书') hint '请核对域名 A/AAAA 解析、TCP 80 放行及占用情况，并查看上方 ACME 错误。';;
+        *) hint '请运行 journalctl -u xray -n 50 --no-pager 查看服务日志；如显示备份路径，请保留备份。';;
+    esac
+}
+
 install_xray() (
     set -e
+    local work= existing=0 PORT XPATH UUID INSTALL_CONFIRMED phase='检查系统及依赖'
+    finish_install() {
+        local rc=$?
+        trap - EXIT
+        if (( rc != 0 )); then installation_failure "$phase" "$rc" >&2; fi
+        [[ -z $work ]] || rm -rf -- "$work"
+        exit "$rc"
+    }
+    trap finish_install EXIT
     section '安装 / 更新环境'
+    hint '按阶段完成依赖、Xray、证书和服务部署，请等待每一步结束。'
     stage 1 4 '检查系统及依赖…'
     dependencies
+    success '系统依赖检查完成。'
     lock
-    local work existing=0 PORT XPATH UUID
     work=$(mktemp -d)
-    trap 'rm -rf -- "$work"' EXIT
     [[ -f $CONFIG ]] && existing=1
-    if (( existing )); then managed_config; fi
+    if (( existing )); then
+        managed_config
+    else
+        phase='配置节点'
+        installation_inputs
+        [[ $INSTALL_CONFIRMED == yes ]] || exit 0
+    fi
+    phase='安装 / 更新 Xray'
     stage 2 4 '安装 / 更新 Xray…'
     download "$INSTALL_URL" "$work/install-release.sh"
     bash -n "$work/install-release.sh"
     # 官方安装器可能升级并重启核心；现有配置不重新生成。
+    hint '正在下载或更新 Xray 核心，请稍候…'
     run_logged bash "$work/install-release.sh" install
+    success 'Xray 核心安装 / 更新完成。'
     if (( ! existing )); then
         # 官方安装器可能写入空配置；失败重试时不能把它误认成已有节点。
         rm -f -- "$CONFIG"
@@ -356,16 +443,6 @@ install_xray() (
         cp "$CONFIG" "$work/candidate.json"
         say '已有配置：保留全部用户、UUID、端口和路径。'
     else
-        ask DOMAIN '请输入域名（已解析到本服务器）：'
-        DOMAIN=${DOMAIN,,}
-        domain_valid "$DOMAIN" || die '域名格式错误，请使用普通域名或 Punycode，不含协议/端口/路径。'
-        ask PORT '监听端口 [443]：'; PORT=${PORT:-443}
-        [[ $PORT =~ ^[0-9]{1,5}$ ]] || die '端口必须是 1–65535 的整数。'
-        PORT=$((10#$PORT))
-        (( PORT >= 1 && PORT <= 65535 && PORT != 80 )) || die '端口须为 1–65535，且保留 80 给证书验证。'
-        [[ -z $(ss -H -ltn "sport = :$PORT") ]] || die "TCP $PORT 已被占用。"
-        ask XPATH 'xHTTP 路径 [/]：'; XPATH=${XPATH:-/}
-        [[ $XPATH == /* && $XPATH != *[[:space:]]* && $XPATH != *\?* && $XPATH != *\#* ]] || die '路径须以 / 开头，且不包含空白、? 或 #。'
         UUID=$(new_uuid)
         jq -n --argjson port "$PORT" --arg id "$UUID" --arg path "$XPATH" --arg cert "$CERT" --arg key "$KEY" '
           {log:{loglevel:"warning"},inbounds:[{port:$port,protocol:"vless",
@@ -376,13 +453,20 @@ install_xray() (
         ' > "$work/candidate.json"
         printf '%s\n' "$DOMAIN" > "$DOMAIN_FILE"
     fi
+    phase='准备域名证书'
     stage 3 4 '准备域名证书…'
+    hint '正在申请、续期或复用证书；公网验证可能需要一些时间，请稍候…'
     prepare_certificate
+    success '域名证书已准备完成。'
+    phase='检查配置并启动服务'
     stage 4 4 '检查配置并启动服务…'
     apply_config "$work/candidate.json" yes
     systemctl enable xray
+    section '安装结果'
     success '安装/更新完成；证书续期回调已注册。'
+    field '服务状态' '运行中' 32
     list_users
+    hint '以后输入 xy 打开管理菜单；普通用户使用 sudo xy。'
 )
 
 renew_reload() (

@@ -146,11 +146,26 @@ def main():
     run('apt-get', 'install', '-y', 'curl', 'ca-certificates', env=dict(os.environ, DEBIAN_FRONTEND='noninteractive'))
     child = spawn('bash', ['-c', bootstrap])
     child.expect_exact('请输入域名（已解析到本服务器）：')
+    child.sendline('https://invalid/')
+    child.expect_exact('域名格式错误')
+    child.expect_exact('请输入域名（已解析到本服务器）：')
     child.sendline('ci.example.test')
+    child.expect_exact('监听端口 [443]：')
+    child.sendline('abc')
+    child.expect_exact('端口必须是 1–65535 的整数。')
+    child.expect_exact('监听端口 [443]：')
+    child.sendline('80')
+    child.expect_exact('端口须为 1–65535，且保留 80 给证书验证。')
     child.expect_exact('监听端口 [443]：')
     child.sendline('8443')
     child.expect_exact('xHTTP 路径 [/]：')
+    child.sendline('bad-path')
+    child.expect_exact('路径须以 / 开头')
+    child.expect_exact('xHTTP 路径 [/]：')
     child.sendline('/ci')
+    child.expect_exact('请确认节点信息')
+    child.expect_exact('确认并继续？[Y/n]（输入 e 重新填写）：')
+    child.sendline('')
     child.expect_exact('安装/更新完成；证书续期回调已注册。')
     resume(child)
     check('downloaded manager matches checkout', Path('/usr/local/bin/xy').read_bytes() == (ROOT / 'xy.sh').read_bytes())
@@ -161,6 +176,23 @@ def main():
     run('systemctl', 'is-active', 'cron')
     check('independent renewal cron installed', Path('/etc/cron.d/xy-acme').is_file())
     admin = content()['inbounds'][0]['settings']['clients'][0]['id']
+
+    # Input review is read-only: cancel, edit, and occupied-port recovery.
+    baseline = (CONFIG.read_bytes(), digest(CERT), digest(KEY))
+    cancelled = manager('installation_inputs\nprintf "confirmed=%s\\n" "$INSTALL_CONFIRMED"',
+                        input='cancel.example.test\n9443\n/\nn\n', capture_output=True)
+    check('cancel input review does not touch live state', 'confirmed=no' in cancelled.stdout and
+          baseline == (CONFIG.read_bytes(), digest(CERT), digest(KEY)))
+    edited = manager('installation_inputs\nprintf "result=%s,%s,%s,%s\\n" "$INSTALL_CONFIRMED" "$DOMAIN" "$PORT" "$XPATH"',
+                     input='first.example.test\n9443\n/\ne\nci.example.test\n8443\n9443\n/edited\ny\n',
+                     capture_output=True)
+    check('review can edit values and recover occupied port', 'TCP 8443 已被占用' in edited.stdout and
+          'result=yes,ci.example.test,9443,/edited' in edited.stdout)
+    failure = manager("dependencies() { echo fixture-dependency-error >&2; return 19; }\ninstall_xray",
+                      check_result=False, capture_output=True)
+    check('installation error retains stage, detail, advice and exit status', failure.returncode == 19 and
+          all(text in failure.stderr for text in ('fixture-dependency-error', '检查系统及依赖', '软件源')) and
+          baseline == (CONFIG.read_bytes(), digest(CERT), digest(KEY)))
 
     # Presentation checks use real PTYs; links must stay identical when copied.
     plain = manager('print_link admin ' + admin, capture_output=True).stdout
