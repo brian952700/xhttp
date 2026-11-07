@@ -664,18 +664,11 @@ print_link() {
     path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$CONFIG") || return
     local link
     link="vless://$2@$domain:$port?encryption=none&security=tls&sni=$(uri "$domain")&type=xhttp&path=$(uri "$path")#$(uri "$1")"
-    section '节点信息'
+    printf '\n'
     field '用户名' "$1" 94
-    field '服务器地址' "$domain" 35
-    field '端口' "$port" 94
-    field '传输方式' 'xHTTP' 94
-    field '路径' "$path" 94
-    field 'TLS 域名' "$domain" 35
-    field 'UUID' "$2" 94
-    printf '\n  '; paint 36 '导入链接：'; printf '\n\n'
-    # 链接独立一行，无缩进或装饰字符；复制后可直接导入。
+    # 链接独立一行，方便复制导入。
     paint 32 "$link"
-    printf '\n\n  '; paint 90 '请复制上方链接，导入支持 xHTTP 的客户端。'; printf '\n\n'
+    printf '\n'
 }
 
 list_users() (
