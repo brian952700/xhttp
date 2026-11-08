@@ -21,7 +21,7 @@ INSTALL_URL=https://raw.githubusercontent.com/XTLS/Xray-install/main/install-rel
 # 非终端、NO_COLOR 或 TERM=dumb 时禁用颜色。
 color_enabled() { [[ -t 1 && ! ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]]; }
 paint() {
-    if color_enabled; then printf '\033[%sm%s\033[0m' "$1" "$2"
+    if [[ ${render_color:-} == yes ]] || color_enabled; then printf '\033[%sm%s\033[0m' "$1" "$2"
     else printf '%s' "$2"; fi
 }
 say() { printf '  %s\n' "$*"; }
@@ -29,7 +29,10 @@ success() { printf '\n  '; paint 32 "✓ $*"; printf '\n\n'; }
 warn() { printf '\n  '; paint 33 "$*"; printf '\n\n'; }
 error() { printf '\n  '; paint 31 "$*"; printf '\n\n'; }
 die() { error "错误：$*" >&2; exit 1; }
-prompt() { printf '\n  '; paint 33 "$1"; printf '\n  › '; }
+prompt() {
+    if color_enabled; then printf '\n  \033[33m%s\033[0m\n  › ' "$1"
+    else printf '\n  %s\n  › ' "$1"; fi
+}
 hint() { printf '\n  '; paint 90 "$*"; printf '\n'; }
 ask() { prompt "$2"; read -r "$1" || die '输入已结束。'; }
 pause() {
@@ -76,21 +79,27 @@ show_menu() {
         domain=$(cat "$DOMAIN_FILE")
         domain_valid "$domain" || domain='域名记录异常'
     fi
-    section 'XHTTP 节点管理'
-    printf '  '; paint 90 'VLESS · xHTTP · TLS'; printf '\n\n'
-    field '服务状态' "$state" "$tone"
-    field '当前域名' "$domain" 35
-    printf '\n'
-    say '1. 安装/更新环境（保留现有配置）'
-    say '2. 添加用户'
-    say '3. 删除用户'
-    say '4. 查看所有用户及链接'
-    printf '\n'
-    say '5. 彻底卸载'
-    say '6. 重启 Xray 服务'
-    say '7. 更新域名及证书'
-    printf '\n'
-    say '8. 退出'
+    # Render first so the terminal receives the menu in one write.
+    local render_color=no menu
+    if color_enabled; then render_color=yes; fi
+    menu=$(
+        section 'XHTTP 节点管理'
+        printf '  '; paint 90 'VLESS · xHTTP · TLS'; printf '\n\n'
+        field '服务状态' "$state" "$tone"
+        field '当前域名' "$domain" 35
+        printf '\n'
+        say '1. 安装/更新环境（保留现有配置）'
+        say '2. 添加用户'
+        say '3. 删除用户'
+        say '4. 查看所有用户及链接'
+        printf '\n'
+        say '5. 彻底卸载'
+        say '6. 重启 Xray 服务'
+        say '7. 更新域名及证书'
+        printf '\n'
+        say '8. 退出'
+    )
+    printf '%s\n' "$menu"
 }
 
 new_uuid() { cat /proc/sys/kernel/random/uuid; }
