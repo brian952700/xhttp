@@ -198,6 +198,7 @@ def main():
     plain = manager('print_link admin ' + admin, capture_output=True).stdout
     check('redirected node output has no ANSI codes', '\x1b' not in plain)
     link = next(line for line in plain.splitlines() if line.startswith('vless://'))
+    check('exported link omits explicit SNI', '&sni=' not in link.split('#', 1)[0] and '?sni=' not in link.split('#', 1)[0])
     check('node export contains only username and standalone link',
           [' '.join(line.split()) for line in plain.splitlines() if line.strip()] == ['用户名 admin', link])
 

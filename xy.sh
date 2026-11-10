@@ -672,7 +672,7 @@ print_link() {
     port=$(jq -r '.inbounds[0].port' "$CONFIG") || return
     path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$CONFIG") || return
     local link
-    link="vless://$2@$domain:$port?encryption=none&security=tls&sni=$(uri "$domain")&type=xhttp&path=$(uri "$path")#$(uri "$1")"
+    link="vless://$2@$domain:$port?encryption=none&security=tls&type=xhttp&path=$(uri "$path")#$(uri "$1")"
     printf '\n'
     field '用户名' "$1" 94
     # 链接独立一行，方便复制导入。
