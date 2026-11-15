@@ -53,7 +53,15 @@ main() (
         --retry 3 --connect-timeout 20 --max-time 300 "$url" -o "$temp/xy.sh"
     [[ -s $temp/xy.sh ]] || { printf '错误：下载的脚本为空。\n' >&2; exit 1; }
     bash -n "$temp/xy.sh"
-    "${elevate[@]}" install -o root -g root -m 0755 "$temp/xy.sh" "$target"
+    "${elevate[@]}" bash -euc '
+        staged=$(mktemp "$2.XXXXXX")
+        trap '\''rm -f -- "$staged"'\'' EXIT
+        trap '\''exit 130'\'' INT
+        trap '\''exit 143'\'' TERM
+        install -o root -g root -m 0755 -- "$1" "$staged"
+        bash -n "$staged"
+        mv -fT -- "$staged" "$2"
+    ' bash "$temp/xy.sh" "$target"
     printf '\n  安装完成。以后使用 sudo xy（root 用户直接输入 xy）打开菜单。\n\n'
     "${elevate[@]}" "$target" </dev/tty
 )

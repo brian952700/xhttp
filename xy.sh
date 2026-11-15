@@ -113,17 +113,35 @@ platform() {
 }
 
 dependencies() {
+    local c package status pm service missing=no
+    local -a packages=(ca-certificates curl jq openssl socat cron util-linux iproute2 unzip tar)
+    for c in curl jq openssl socat cron flock runuser ss unzip tar; do
+        if [[ $c == cron ]] && ! command -v apt-get >/dev/null; then c=crond; fi
+        command -v "$c" >/dev/null || missing=yes
+    done
     if command -v apt-get >/dev/null; then
-        run_logged apt-get update || return
-        run_logged env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl jq openssl socat cron util-linux iproute2 unzip tar || return
-        systemctl enable --now cron || return
+        service=cron
+        [[ -s /etc/ssl/certs/ca-certificates.crt ]] || missing=yes
+        for package in "${packages[@]}"; do
+            status=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null) || status=
+            [[ $status == *' ok installed' ]] || missing=yes
+        done
+        if [[ $missing == yes ]]; then
+            run_logged apt-get update || return
+            run_logged env DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}" || return
+        fi
     elif command -v dnf >/dev/null || command -v yum >/dev/null; then
-        local pm
-        pm=$(command -v dnf || command -v yum)
-        run_logged "$pm" install -y ca-certificates curl jq openssl socat cronie util-linux iproute unzip tar || return
-        systemctl enable --now crond || return
+        service=crond
+        if [[ $missing == yes || ! -s /etc/pki/tls/certs/ca-bundle.crt ]] ||
+           ! rpm -q ca-certificates curl jq openssl socat cronie util-linux iproute unzip tar >/dev/null; then
+            pm=$(command -v dnf || command -v yum)
+            run_logged "$pm" install -y ca-certificates curl jq openssl socat cronie util-linux iproute unzip tar || return
+        fi
     else
         say '不支持此包管理器。'; return 1
+    fi
+    if ! systemctl is-active --quiet "$service" || ! systemctl is-enabled --quiet "$service"; then
+        systemctl enable --now "$service"
     fi
 }
 
@@ -421,16 +439,23 @@ install_xray() (
     stage 1 4 '检查系统及依赖…'
     dependencies
     success '系统依赖检查完成。'
-    lock
-    work=$(mktemp -d)
-    [[ -f $CONFIG ]] && existing=1
-    if (( existing )); then
-        managed_config
+    if [[ -f $CONFIG ]]; then
+        existing=1
     else
         phase='配置节点'
         installation_inputs
         [[ $INSTALL_CONFIRMED == yes ]] || exit 0
     fi
+    lock
+    if (( existing )); then
+        managed_config
+    else
+        [[ ! -e $CONFIG ]] || die '其他操作已创建配置，请重新打开菜单 1。'
+        local listeners
+        listeners=$(ss -H -ltn "sport = :$PORT")
+        [[ -z $listeners ]] || die "TCP $PORT 已被占用，请重新选择端口。"
+    fi
+    work=$(mktemp -d)
     phase='安装 / 更新 Xray'
     stage 2 4 '安装 / 更新 Xray…'
     download "$INSTALL_URL" "$work/install-release.sh"
@@ -603,6 +628,7 @@ update_domain_cert() (
     success '域名及证书更新完成。用户、UUID、端口和路径已保留。'
     say '如更换了域名，请使用下方新链接更新客户端：'
     list_users
+    exec 9>&-
     if [[ $DOMAIN != "$OLD_DOMAIN" ]]; then
         field '待清理旧域名' "$OLD_DOMAIN" 35
         warn '请先使用新链接确认客户端可以连接；清理后切回旧域名需要重新申请证书。'
@@ -613,7 +639,9 @@ update_domain_cert() (
         elif [[ $CONFIRM =~ ^[Yy]$ ]]; then
             local old_suffix=
             [[ ${#old_ecc[@]} -eq 0 ]] || old_suffix=_ecc
-            if ! cleanup_old_domain_cert "$OLD_DOMAIN" "$old_base" "$old_suffix"; then
+            lock
+            if [[ $(cat "$DOMAIN_FILE") != "$DOMAIN" ]] ||
+               ! cleanup_old_domain_cert "$OLD_DOMAIN" "$old_base" "$old_suffix"; then
                 say '旧证书未能安全清理，已保留未删除的文件；新域名更新已完成。' >&2
             fi
         else

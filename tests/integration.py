@@ -165,6 +165,8 @@ def main():
     child.sendline('/ci')
     child.expect_exact('请确认节点信息')
     child.expect_exact('确认并继续？[Y/n]（输入 e 重新填写）：')
+    Path('/run/xy').mkdir(mode=0o700, exist_ok=True)
+    run('flock', '-n', '/run/xy/manager.lock', 'true')
     child.sendline('')
     child.expect_exact('安装/更新完成；证书续期回调已注册。')
     resume(child)
@@ -193,6 +195,8 @@ def main():
     check('installation error retains stage, detail, advice and exit status', failure.returncode == 19 and
           all(text in failure.stderr for text in ('fixture-dependency-error', '检查系统及依赖', '软件源')) and
           baseline == (CONFIG.read_bytes(), digest(CERT), digest(KEY)))
+
+    manager("run_logged() { echo 'unexpected package manager invocation' >&2; return 1; }\ndependencies")
 
     # Presentation checks use real PTYs; links must stay identical when copied.
     plain = manager('print_link admin ' + admin, capture_output=True).stdout
@@ -367,6 +371,7 @@ update_domain_cert"""
     child.expect_exact('域名及证书更新完成。')
     child.expect_exact('@next.example.test:8443')
     child.expect_exact('是否清理旧域名证书？[y/N]：')
+    run('flock', '-n', '/run/xy/manager.lock', 'true')
     child.sendline('')
     resume(child)
     check('cleanup defaults to preserving old archive and staging',
@@ -463,11 +468,13 @@ update_domain_cert"""
     sudoers.write_text('ciuser ALL=(ALL) NOPASSWD: ALL\n')
     sudoers.chmod(0o440)
     before = CONFIG.read_bytes()
+    previous_inode = Path('/usr/local/bin/xy').stat().st_ino
     run('apt-get', 'remove', '-y', 'curl')
     child = spawn('runuser', ['-u', 'ciuser', '--', 'bash', str(ROOT / 'install.sh')])
     child.expect_exact(MENU)
     child.sendline('8')
     close(child)
+    check('bootstrap replaces manager inode', Path('/usr/local/bin/xy').stat().st_ino != previous_inode)
     check('non-root entry restores curl and preserves configuration', shutil.which('curl') is not None and CONFIG.read_bytes() == before)
 
     shared = Path('/root/.acme.sh/unrelated-site.keep')
