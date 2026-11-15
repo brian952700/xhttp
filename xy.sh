@@ -103,7 +103,6 @@ show_menu() {
 }
 
 new_uuid() { cat /proc/sys/kernel/random/uuid; }
-uri() { jq -rn --arg value "$1" '$value | @uri'; }
 download() { curl --fail --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --max-time 300 "$1" -o "$2"; }
 lock() { install -d -o root -g root -m 0700 /run/xy; exec 9>"$LOCK"; flock -w 120 9 || die '另一项操作仍在进行，请稍后再试。'; }
 
@@ -485,7 +484,6 @@ install_xray() (
           tlsSettings:{certificates:[{certificateFile:$cert,keyFile:$key}]}}}],
           outbounds:[{protocol:"freedom"}]}
         ' > "$work/candidate.json"
-        printf '%s\n' "$DOMAIN" > "$DOMAIN_FILE"
     fi
     phase='准备域名证书'
     stage 3 4 '准备域名证书…'
@@ -494,7 +492,7 @@ install_xray() (
     success '域名证书已准备完成。'
     phase='检查配置并启动服务'
     stage 4 4 '检查配置并启动服务…'
-    apply_config "$work/candidate.json" yes
+    apply_config "$work/candidate.json" yes "$DOMAIN"
     systemctl enable xray
     section '安装结果'
     success '安装/更新完成；证书续期回调已注册。'
@@ -694,30 +692,31 @@ del_user() (
     success "已删除用户：$EMAIL"
 )
 
+# 有参数时输出单个用户，否则按配置顺序导出所有用户。
 print_link() {
-    local domain port path
+    local domain records email link
     domain=$(cat "$DOMAIN_FILE") || return
-    port=$(jq -r '.inbounds[0].port' "$CONFIG") || return
-    path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$CONFIG") || return
-    local link
-    link="vless://$2@$domain:$port?encryption=none&security=tls&type=xhttp&path=$(uri "$path")#$(uri "$1")"
-    printf '\n'
-    field '用户名' "$1" 94
-    # 链接独立一行，方便复制导入。
-    paint 32 "$link"
-    printf '\n'
+    records=$(jq -r --arg domain "$domain" --arg email "${1:-}" --arg uuid "${2:-}" '
+        .inbounds[0] as $inbound |
+        ($inbound.streamSettings.xhttpSettings.path | @uri) as $path |
+        (if $uuid == "" then $inbound.settings.clients else [{email: $email, id: $uuid}] end)[] |
+        "\(.email)\u001f" +
+        "vless://\(.id)@\($domain):\($inbound.port)?encryption=none&security=tls&type=xhttp&path=\($path)#\(.email | @uri)"
+    ' "$CONFIG") || return
+    # 用户名禁止控制字符，使用单元分隔符保留空格和反斜杠。
+    while IFS=$'\x1f' read -r email link; do
+        printf '\n'
+        field '用户名' "$email" 94
+        paint 32 "$link"
+        printf '\n'
+    done <<< "$records"
 }
 
 list_users() (
     set -e
     require_tools
     managed_config
-    local row email uuid
-    while IFS= read -r row; do
-        email=$(jq -r '.email' <<< "$row")
-        uuid=$(jq -r '.id' <<< "$row")
-        print_link "$email" "$uuid"
-    done < <(jq -c '.inbounds[0].settings.clients[]' "$CONFIG")
+    print_link
 )
 
 uninstall_all() (

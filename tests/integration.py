@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import unquote
 
 import pexpect
 
@@ -146,6 +147,19 @@ def main():
     run('apt-get', 'install', '-y', 'curl', 'ca-certificates', env=dict(os.environ, DEBIAN_FRONTEND='noninteractive'))
     child = spawn('bash', ['-c', bootstrap])
     child.expect_exact('请输入域名（已解析到本服务器）：')
+    child.sendline('missing.example.test')
+    child.expect_exact('监听端口 [443]：')
+    child.sendline('8443')
+    child.expect_exact('xHTTP 路径 [/]：')
+    child.sendline('/ci')
+    child.expect_exact('确认并继续？[Y/n]（输入 e 重新填写）：')
+    child.sendline('')
+    child.expect_exact('证书申请失败')
+    resume(child)
+    check('failed first issuance leaves no active domain or config',
+          not Path('/etc/xray-cert/domain.txt').exists() and not CONFIG.exists())
+    child.sendline('1')
+    child.expect_exact('请输入域名（已解析到本服务器）：')
     child.sendline('https://invalid/')
     child.expect_exact('域名格式错误')
     child.expect_exact('请输入域名（已解析到本服务器）：')
@@ -242,6 +256,12 @@ def main():
     child.expect_exact('已添加用户：' + username)
     resume(child)
     check('special-character user safely added', any(c['email'] == username for c in content()['inbounds'][0]['settings']['clients']))
+    exports = manager('list_users', capture_output=True).stdout.splitlines()
+    links = [line for line in exports if line.startswith('vless://')]
+    check('batch export preserves order, names and link encoding',
+          [unquote(link.split('#', 1)[1]) for link in links] == ['admin', username] and
+          all('@ci.example.test:8443?' in link and '&path=%2Fci#' in link for link in links) and
+          any(line.endswith(username) for line in exports if '用户名' in line))
     before = content()
     child.sendline('1')
     child.expect_exact('安装/更新完成；证书续期回调已注册。')
