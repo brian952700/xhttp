@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VLESS + xHTTP + TLS 管理器。主要目标：Debian 12/13 + systemd。
 # 安装：sudo install -m 0755 xy.sh /usr/local/bin/xy && sudo /usr/local/bin/xy
-# 配置、证书操作有回滚；软件包/核心升级不属于可回滚事务。
+# 配置、证书和已有 Xray 的核心升级有回滚；系统软件包不属于此事务。
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
@@ -205,7 +205,7 @@ healthy_restart() {
 atomic_copy() {
     local tmp
     tmp=$(mktemp "${2}.xy.XXXXXX") || return 1
-    if cp --preserve=mode,ownership -- "$1" "$tmp" && mv -f -- "$tmp" "$2"; then
+    if cp -aT -- "$1" "$tmp" && mv -fT -- "$tmp" "$2"; then
         return 0
     fi
     rm -f -- "$tmp"
@@ -215,7 +215,7 @@ atomic_copy() {
 # 调用方持有锁。多文件事务在普通错误、INT/TERM 时恢复；断电/SIGKILL 不在此保证内。
 apply_config() (
     set -e
-    local candidate=$1 with_cert=${2:-no} new_domain=${3:-} host_check backup armed=0 was_active=0 failed=0 f
+    local candidate=$1 with_cert=${2:-no} new_domain=${3:-} defer_service_restore=${4:-no} host_check backup armed=0 was_active=0 failed=0 f
     identity
     backup=$(mktemp -d "$XRAY_DIR/.xy-backup.XXXXXX")
     systemctl is-active --quiet xray && was_active=1
@@ -232,16 +232,20 @@ apply_config() (
                     rm -f -- "$target" || failed=1
                 fi
             done
-            if (( was_active )); then
-                healthy_restart || failed=1
-            else
-                systemctl stop xray || failed=1
+            if [[ $defer_service_restore != yes ]]; then
+                if (( was_active )); then
+                    healthy_restart || failed=1
+                else
+                    systemctl stop xray || failed=1
+                fi
             fi
             if (( failed )); then
                 say "自动恢复未完全成功，备份保留于：$backup。请检查 journalctl -u xray -n 50。" >&2
                 exit 1
             fi
-            say '操作失败，已恢复操作前的配置/证书及服务状态。' >&2
+            if [[ $defer_service_restore != yes ]]; then
+                say '操作失败，已恢复操作前的配置/证书及服务状态。' >&2
+            fi
         fi
         rm -rf -- "$backup"
         exit "$rc"
@@ -422,17 +426,68 @@ installation_failure() {
     esac
 }
 
+# 调用方持有锁。先恢复磁盘上的旧核心和配置，再恢复服务。
+restore_xray_upgrade() {
+    local backup=$1 previous_invocation=$2 was_active=$3 previous_enabled=$4
+    shift 4
+    local file entry current_enabled invocation failed=0
+    for file in "$@"; do
+        entry=$backup$file
+        if [[ -e $entry || -L $entry ]]; then
+            atomic_copy "$entry" "$file" || failed=1
+        else
+            rm -f -- "$file" || failed=1
+        fi
+    done
+    current_enabled=$(systemctl is-enabled xray) || :
+    if [[ $current_enabled != "$previous_enabled" ]]; then
+        case $previous_enabled in
+            enabled) systemctl enable xray || failed=1;;
+            disabled) systemctl disable xray || failed=1;;
+            enabled-runtime)
+                systemctl disable xray && systemctl enable --runtime xray || failed=1
+                ;;
+            *) failed=1;;
+        esac
+    fi
+    # 验证或下载失败时，旧进程可能仍在正常运行。
+    if (( was_active )); then
+        invocation=$(systemctl show -p InvocationID --value xray) || invocation=
+        if [[ -z $invocation || $invocation != "$previous_invocation" ]] ||
+           ! systemctl is-active --quiet xray; then
+            healthy_restart || failed=1
+        fi
+    elif systemctl is-active --quiet xray; then
+        systemctl stop xray || failed=1
+    fi
+    return "$failed"
+}
+
 install_xray() (
     set -e
-    local work= existing=0 PORT XPATH UUID INSTALL_CONFIRMED phase='检查系统及依赖'
+    local work= existing=0 rollback=0 was_active=0 invocation= enabled= file
+    local PORT XPATH UUID INSTALL_CONFIRMED phase='检查系统及依赖'
+    local core=/usr/local/bin/xray geodata=/usr/local/share/xray
+    local -a upgrade_files=("$core" "$geodata/geoip.dat" "$geodata/geosite.dat"
+                             "$CONFIG" "$CERT" "$KEY" "$DOMAIN_FILE")
     finish_install() {
         local rc=$?
-        trap - EXIT
+        trap '' HUP INT TERM
         if (( rc != 0 )); then installation_failure "$phase" "$rc" >&2; fi
+        if (( rollback )); then
+            if ! restore_xray_upgrade "$work/previous" "$invocation" "$was_active" "$enabled" "${upgrade_files[@]}"; then
+                error "升级恢复未完成，备份保留于：$work/previous。" >&2
+                return 1
+            fi
+            say '升级失败，已恢复原 Xray 核心、配置、证书及服务状态。' >&2
+        fi
         [[ -z $work ]] || rm -rf -- "$work"
-        exit "$rc"
+        return "$rc"
     }
-    trap finish_install EXIT
+    trap 'finish_install || exit $?' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     section '安装 / 更新环境'
     hint '按阶段完成依赖、Xray、证书和服务部署，请等待每一步结束。'
     stage 1 4 '检查系统及依赖…'
@@ -457,11 +512,41 @@ install_xray() (
     work=$(mktemp -d)
     phase='安装 / 更新 Xray'
     stage 2 4 '安装 / 更新 Xray…'
+    if (( existing )); then
+        [[ -s $DOMAIN_FILE ]] || die '旧配置缺少 /etc/xray-cert/domain.txt，请先补入实际域名。'
+        DOMAIN=$(cat "$DOMAIN_FILE")
+        domain_valid "$DOMAIN" || die '保存的域名格式无效。'
+        cp -p -- "$CONFIG" "$work/candidate.json"
+    fi
+    hint '正在下载或更新 Xray 核心，请稍候…'
     download "$INSTALL_URL" "$work/install-release.sh"
     bash -n "$work/install-release.sh"
-    # 官方安装器可能升级并重启核心；现有配置不重新生成。
-    hint '正在下载或更新 Xray 核心，请稍候…'
-    run_logged bash "$work/install-release.sh" install
+    if (( existing )) && [[ -f $core && -f /etc/systemd/system/xray.service ]]; then
+        invocation=$(systemctl show -p InvocationID --value xray)
+        if systemctl is-active --quiet xray; then was_active=1; fi
+        enabled=$(systemctl is-enabled xray) || :
+        for file in "${upgrade_files[@]}"; do
+            if [[ -e $file || -L $file ]]; then
+                mkdir -p -- "$work/previous${file%/*}"
+                cp -a -- "$file" "$work/previous$file"
+            fi
+        done
+        rollback=1
+        # 临时目录隔离上游的递归权限修改，保留现有服务单元及日志。
+        run_logged env -u JSONS_PATH DAT_PATH="$work/geodata" JSON_PATH="$work/config" \
+            bash "$work/install-release.sh" install --manually-restart-later --no-update-service --without-logfiles
+        if [[ -d $work/geodata ]]; then
+            [[ -s $work/geodata/geoip.dat && -s $work/geodata/geosite.dat ]] ||
+                die 'Xray 数据文件不完整。'
+            if [[ ! -d $geodata ]]; then
+                install -d -o xray -g xray -m 0755 "$geodata"
+            fi
+            atomic_copy "$work/geodata/geoip.dat" "$geodata/geoip.dat"
+            atomic_copy "$work/geodata/geosite.dat" "$geodata/geosite.dat"
+        fi
+    else
+        run_logged bash "$work/install-release.sh" install
+    fi
     success 'Xray 核心安装 / 更新完成。'
     if (( ! existing )); then
         # 官方安装器可能写入空配置；失败重试时不能把它误认成已有节点。
@@ -470,10 +555,6 @@ install_xray() (
     require_tools
     directories
     if (( existing )); then
-        [[ -s $DOMAIN_FILE ]] || die '旧配置缺少 /etc/xray-cert/domain.txt，请先补入实际域名。'
-        DOMAIN=$(cat "$DOMAIN_FILE")
-        domain_valid "$DOMAIN" || die '保存的域名格式无效。'
-        cp "$CONFIG" "$work/candidate.json"
         say '已有配置：保留全部用户、UUID、端口和路径。'
     else
         UUID=$(new_uuid)
@@ -492,8 +573,13 @@ install_xray() (
     success '域名证书已准备完成。'
     phase='检查配置并启动服务'
     stage 4 4 '检查配置并启动服务…'
-    apply_config "$work/candidate.json" yes "$DOMAIN"
+    if (( rollback )); then
+        apply_config "$work/candidate.json" yes "$DOMAIN" yes
+    else
+        apply_config "$work/candidate.json" yes "$DOMAIN"
+    fi
     systemctl enable xray
+    rollback=0
     section '安装结果'
     success '安装/更新完成；证书续期回调已注册。'
     field '服务状态' '运行中' 32

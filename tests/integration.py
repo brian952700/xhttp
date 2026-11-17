@@ -329,6 +329,66 @@ def main():
     manager('lock\napply_config /tmp/debug-server.json')
     proxy_test(admin)
 
+    # Exercise a real core upgrade and one failed activation with the original client.
+    upstream = Path('/tmp/xy-ci-upstream.sh')
+    run('curl', '-fsSL', '--retry', '3',
+        'https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh', '-o', str(upstream))
+    run('bash', str(upstream), 'install', '--version', 'v26.10.31',
+        '--manually-restart-later', '--no-update-service', '--without-logfiles')
+    run('systemctl', 'restart', 'xray')
+    core = Path('/usr/local/bin/xray')
+    check('pinned old Xray core installed',
+          '26.10.31' in run(str(core), '-version', capture_output=True).stdout.splitlines()[0])
+    proxy_test(admin)
+
+    tracked = (core, CONFIG, CERT, KEY, Path('/etc/xray-cert/domain.txt'),
+               Path('/usr/local/share/xray/geoip.dat'), Path('/usr/local/share/xray/geosite.dat'),
+               Path('/etc/systemd/system/xray.service'))
+    def snapshot():
+        return [(digest(p), p.stat().st_uid, p.stat().st_gid, p.stat().st_mode) for p in tracked]
+
+    def main_pid():
+        return run('systemctl', 'show', '-p', 'MainPID', '--value', 'xray',
+                   capture_output=True).stdout.strip()
+
+    previous = snapshot()
+    marker = Path('/tmp/xy-ci-failed-activation')
+    pinned_installer = Path('/tmp/xy-ci-upgrade-installer')
+    pinned_installer.write_text('#!/usr/bin/env bash\nexec bash /tmp/xy-ci-upstream.sh "$@" --version v26.11.9\n')
+    pinned_download = '''download() {
+    if [[ $1 == "$INSTALL_URL" ]]; then
+        cp /tmp/xy-ci-upgrade-installer "$2"
+    else
+        curl -fsSL "$1" -o "$2"
+    fi
+}
+'''
+    fail_activation = '''eval "$(declare -f healthy_restart | sed '1s/healthy_restart/real_restart/')"
+healthy_restart() {
+    if [[ ! -e /tmp/xy-ci-failed-activation ]]; then
+        /usr/local/bin/xray -version | grep -q '26[.]11[.]9' || return 98
+        [[ $(systemctl show -p MainPID --value xray) == "$CI_OLD_PID" ]] || return 99
+        systemctl stop xray || return
+        touch /tmp/xy-ci-failed-activation || return
+        return 19
+    fi
+    real_restart
+}
+install_xray'''
+    failed = manager(pinned_download + fail_activation, check_result=False,
+                     env=dict(os.environ, CI_OLD_PID=main_pid()))
+    check('failed activation kept old process until cutover and restored old deployment',
+          failed.returncode == 19 and marker.is_file() and active() and snapshot() == previous and
+          digest(Path(f'/proc/{main_pid()}/exe')) == previous[0][0])
+    proxy_test(admin)
+
+    manager(pinned_download + 'install_xray')
+    check('retry starts the upgraded core and preserves node and service settings',
+          '26.11.9' in run(str(core), '-version', capture_output=True).stdout.splitlines()[0] and
+          active() and digest(Path(f'/proc/{main_pid()}/exe')) == digest(core) != previous[0][0] and
+          snapshot()[1:5] == previous[1:5] and snapshot()[-1] == previous[-1])
+    proxy_test(admin)
+
     before = CONFIG.read_bytes()
     Path('/tmp/invalid.json').write_text('{invalid')
     result = manager('lock\napply_config /tmp/invalid.json', check_result=False)
