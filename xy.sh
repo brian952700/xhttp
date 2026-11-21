@@ -66,7 +66,7 @@ field() { printf '  %-12s ' "$1"; paint "$3" "$2"; printf '\n'; }
 # 只包装外部命令，避免改变 shell 函数中的失败语义。
 # 终端收起成功命令的重复输出，失败完整显示；日志/XY_VERBOSE=1 保留输出。
 # 只在交互终端更新一行，避免慢速 SSH 会话积累进度输出。
-show_wait_status() (
+show_wait_status() {
     local output=$1 marker=$2 interval=5 elapsed=0 sleeper= sample percent
     local previous_percent= filled bar progress_pattern='^[#[:blank:]]+([0-9]{1,3}\.[0-9]+)%[[:blank:]]*$'
     trap 'if [[ -n $sleeper ]]; then kill "$sleeper" 2>/dev/null || :; fi; exit 0' TERM
@@ -102,7 +102,7 @@ show_wait_status() (
             printf '\r\033[K  %s 已等待 %d 秒' "$install_wait_message" "$elapsed"
         fi
     done
-)
+}
 
 run_logged() (
     if [[ ! -t 1 || ${XY_VERBOSE:-0} == 1 ]]; then "$@"; exit $?; fi
