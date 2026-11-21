@@ -65,34 +65,77 @@ field() { printf '  %-12s ' "$1"; paint "$3" "$2"; printf '\n'; }
 
 # 只包装外部命令，避免改变 shell 函数中的失败语义。
 # 终端收起成功命令的重复输出，失败完整显示；日志/XY_VERBOSE=1 保留输出。
+# 只在交互终端更新一行，避免慢速 SSH 会话积累进度输出。
+show_wait_status() (
+    local output=$1 marker=$2 interval=5 elapsed=0 sleeper= sample percent
+    local previous_percent= filled bar progress_pattern='^[#[:blank:]]+([0-9]{1,3}\.[0-9]+)%[[:blank:]]*$'
+    trap 'if [[ -n $sleeper ]]; then kill "$sleeper" 2>/dev/null || :; fi; exit 0' TERM
+    if [[ ${TERM:-dumb} == dumb ]]; then
+        sleep 5 &
+        sleeper=$!
+        wait "$sleeper" && hint "$install_wait_message"
+        exit 0
+    fi
+    if [[ ${download_progress:-no} == yes ]]; then interval=1; fi
+    while true; do
+        sleep "$interval" &
+        sleeper=$!
+        wait "$sleeper" || exit 0
+        sleeper=
+        elapsed=$((elapsed + interval))
+        if [[ ${download_progress:-no} == yes ]]; then
+            sample=$(tail -c 4096 -- "$output" | tr '\r' '\n' | tail -n 1)
+            if [[ $sample =~ $progress_pattern ]]; then
+                percent=${BASH_REMATCH[1]}
+                if [[ $percent != "$previous_percent" ]]; then
+                    : > "$marker"
+                    filled=$((10#${percent%.*} / 5))
+                    printf -v bar '%*s' "$filled" ''
+                    printf '\r\033[K  下载进度 [%.20s] %s%%' "${bar// /#}--------------------" "$percent"
+                    previous_percent=$percent
+                    continue
+                fi
+            fi
+        fi
+        if (( elapsed % 5 == 0 )); then
+            : > "$marker"
+            printf '\r\033[K  %s 已等待 %d 秒' "$install_wait_message" "$elapsed"
+        fi
+    done
+)
+
 run_logged() (
     if [[ ! -t 1 || ${XY_VERBOSE:-0} == 1 ]]; then "$@"; exit $?; fi
-    local output rc=0 wait_notice=
+    local output rc=0 wait_notice= marker
     output=$(mktemp)
+    marker=$output.visible
     stop_wait_notice() {
         if [[ -n $wait_notice ]]; then
             kill "$wait_notice" 2>/dev/null || :
             wait "$wait_notice" 2>/dev/null || :
             wait_notice=
         fi
+        if [[ -e $marker ]]; then
+            printf '\r\033[K'
+            rm -f -- "$marker"
+        fi
     }
     trap 'stop_wait_notice; rm -f -- "$output"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
     if [[ -n ${install_wait_message:-} ]]; then
-        (
-            sleep 5 &
-            sleeper=$!
-            trap 'kill "$sleeper" 2>/dev/null || :; exit 0' TERM
-            if wait "$sleeper"; then hint "$install_wait_message"; fi
-        ) </dev/null 9>&- &
+        show_wait_status "$output" "$marker" </dev/null 9>&- &
         wait_notice=$!
     fi
     "$@" >"$output" 2>&1 || rc=$?
     stop_wait_notice
     if (( rc != 0 )); then
         error "执行失败（退出码 $rc），详细输出：" >&2
-        cat "$output" >&2
+        if [[ ${download_progress:-no} == yes ]]; then
+            tr '\r' '\n' < "$output" | sed -E '/^[#[:blank:]]+[0-9]{1,3}\.[0-9]+%[[:blank:]]*$/d' >&2
+        else
+            cat "$output" >&2
+        fi
     fi
     exit "$rc"
 )
@@ -135,8 +178,14 @@ show_menu() {
 new_uuid() { cat /proc/sys/kernel/random/uuid; }
 download() {
     local -a command=(curl)
+    local download_progress=no
     if [[ -n ${install_wait_message:-} && ${XY_VERBOSE:-0} != 1 && -t 1 ]]; then
-        command=(run_logged curl --silent)
+        if [[ ${TERM:-dumb} == dumb ]]; then
+            command=(run_logged curl --silent)
+        else
+            command=(run_logged curl --progress-bar)
+            download_progress=yes
+        fi
     fi
     "${command[@]}" --fail --show-error --location --proto '=https' --tlsv1.2 \
         --retry 3 --connect-timeout 20 --max-time 300 "$1" -o "$2"
