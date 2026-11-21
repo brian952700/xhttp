@@ -41,12 +41,25 @@ pause() {
     printf '\n'
 }
 section() {
-    printf '\n  '; paint 36 "$*"
-    printf '\n  '; paint 36 '────────────────────────────────'; printf '\n'
+    local render_color=no output
+    if color_enabled; then render_color=yes; fi
+    output=$(
+        printf '\n  '; paint 36 "$*"
+        printf '\n  '; paint 36 '────────────────────────────────'
+    )
+    printf '%s\n' "$output"
 }
 stage() {
-    printf '\n  '; paint 36 '────────────────────────────────'
-    printf '\n  '; paint 36 "[$1/$2] $3"; printf '\n\n'
+    local render_color=no output
+    if color_enabled; then render_color=yes; fi
+    output=$(
+        printf '\n  '; paint 36 '────────────────────────────────'
+        printf '\n  '; paint 36 "[$1/$2] $3"
+        if [[ -n ${4:-} ]]; then
+            printf '\n  '; paint 90 "$4"
+        fi
+    )
+    printf '%s\n\n' "$output"
 }
 field() { printf '  %-12s ' "$1"; paint "$3" "$2"; printf '\n'; }
 
@@ -54,12 +67,29 @@ field() { printf '  %-12s ' "$1"; paint "$3" "$2"; printf '\n'; }
 # 终端收起成功命令的重复输出，失败完整显示；日志/XY_VERBOSE=1 保留输出。
 run_logged() (
     if [[ ! -t 1 || ${XY_VERBOSE:-0} == 1 ]]; then "$@"; exit $?; fi
-    local output rc=0
+    local output rc=0 wait_notice=
     output=$(mktemp)
-    trap 'rm -f -- "$output"' EXIT
+    stop_wait_notice() {
+        if [[ -n $wait_notice ]]; then
+            kill "$wait_notice" 2>/dev/null || :
+            wait "$wait_notice" 2>/dev/null || :
+            wait_notice=
+        fi
+    }
+    trap 'stop_wait_notice; rm -f -- "$output"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    if [[ -n ${install_wait_message:-} ]]; then
+        (
+            sleep 5 &
+            sleeper=$!
+            trap 'kill "$sleeper" 2>/dev/null || :; exit 0' TERM
+            if wait "$sleeper"; then hint "$install_wait_message"; fi
+        ) </dev/null 9>&- &
+        wait_notice=$!
+    fi
     "$@" >"$output" 2>&1 || rc=$?
+    stop_wait_notice
     if (( rc != 0 )); then
         error "执行失败（退出码 $rc），详细输出：" >&2
         cat "$output" >&2
@@ -103,7 +133,14 @@ show_menu() {
 }
 
 new_uuid() { cat /proc/sys/kernel/random/uuid; }
-download() { curl --fail --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --max-time 300 "$1" -o "$2"; }
+download() {
+    local -a command=(curl)
+    if [[ -n ${install_wait_message:-} && ${XY_VERBOSE:-0} != 1 && -t 1 ]]; then
+        command=(run_logged curl --silent)
+    fi
+    "${command[@]}" --fail --show-error --location --proto '=https' --tlsv1.2 \
+        --retry 3 --connect-timeout 20 --max-time 300 "$1" -o "$2"
+}
 lock() { install -d -o root -g root -m 0700 /run/xy; exec 9>"$LOCK"; flock -w 120 9 || die '另一项操作仍在进行，请稍后再试。'; }
 
 platform() {
@@ -466,7 +503,7 @@ restore_xray_upgrade() {
 install_xray() (
     set -e
     local work= existing=0 rollback=0 was_active=0 invocation= enabled= file
-    local PORT XPATH UUID INSTALL_CONFIRMED phase='检查系统及依赖'
+    local PORT XPATH UUID INSTALL_CONFIRMED phase='检查系统及依赖' install_wait_message
     local core=/usr/local/bin/xray geodata=/usr/local/share/xray
     local -a upgrade_files=("$core" "$geodata/geoip.dat" "$geodata/geosite.dat"
                              "$CONFIG" "$CERT" "$KEY" "$DOMAIN_FILE")
@@ -491,6 +528,7 @@ install_xray() (
     section '安装 / 更新环境'
     hint '按阶段完成依赖、Xray、证书和服务部署，请等待每一步结束。'
     stage 1 4 '检查系统及依赖…'
+    install_wait_message='仍在等待系统依赖处理完成…'
     dependencies
     success '系统依赖检查完成。'
     if [[ -f $CONFIG ]]; then
@@ -511,14 +549,14 @@ install_xray() (
     fi
     work=$(mktemp -d)
     phase='安装 / 更新 Xray'
-    stage 2 4 '安装 / 更新 Xray…'
+    stage 2 4 '安装 / 更新 Xray…' '正在下载或更新 Xray 核心，请稍候…'
+    install_wait_message='仍在等待 Xray 下载或更新完成…'
     if (( existing )); then
         [[ -s $DOMAIN_FILE ]] || die '旧配置缺少 /etc/xray-cert/domain.txt，请先补入实际域名。'
         DOMAIN=$(cat "$DOMAIN_FILE")
         domain_valid "$DOMAIN" || die '保存的域名格式无效。'
         cp -p -- "$CONFIG" "$work/candidate.json"
     fi
-    hint '正在下载或更新 Xray 核心，请稍候…'
     download "$INSTALL_URL" "$work/install-release.sh"
     bash -n "$work/install-release.sh"
     if (( existing )) && [[ -f $core && -f /etc/systemd/system/xray.service ]]; then
@@ -567,12 +605,13 @@ install_xray() (
         ' > "$work/candidate.json"
     fi
     phase='准备域名证书'
-    stage 3 4 '准备域名证书…'
-    hint '正在申请、续期或复用证书；公网验证可能需要一些时间，请稍候…'
+    stage 3 4 '准备域名证书…' '正在检查或申请证书，请稍候…'
+    install_wait_message='仍在等待证书工具完成…'
     prepare_certificate
     success '域名证书已准备完成。'
     phase='检查配置并启动服务'
     stage 4 4 '检查配置并启动服务…'
+    install_wait_message='仍在等待配置检查完成…'
     if (( rollback )); then
         apply_config "$work/candidate.json" yes "$DOMAIN" yes
     else
